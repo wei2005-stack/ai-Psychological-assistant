@@ -1,0 +1,39 @@
+# ---- 构建产物 ----
+node_modules/
+dist/
+target/
+out/
+*.class
+*.jar
+*.war
+
+# ---- IDE / 编辑器 ----
+.idea/
+*.iml
+.vscode/
+.trae/
+.trae-html-share-packages/
+.screenshots/
+
+# ---- 环境安装包与大文件（不入库，需本地自行安装）----
+环境设置/
+资料(1)/
+*.zip
+*.msi
+*.pkg
+*.exe
+
+# ---- 个人材料（简历、面试准备）----
+简历-*.pdf
+简历-*.html
+面试准备-*.md
+面试准备-*.docx
+photo.jpg
+
+# ---- 本地密钥 ----
+.env
+*.local.yml
+
+# ---- 系统文件 ----
+.DS_Store
+Thumbs.db
