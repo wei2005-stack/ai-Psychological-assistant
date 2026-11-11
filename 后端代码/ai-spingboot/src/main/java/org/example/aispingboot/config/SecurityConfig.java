@@ -27,7 +27,8 @@ public class SecurityConfig {
     /** 无需登录即可访问的公开路径 */
     private  static final String[] PUBLIC_PATHS = {
             "/",
-            "/api/test",
+            "/api/test",           // 健康检查
+            "/api/test/**",        // 所有测试子接口（Redis、ChatMemory 验证等）
             "/api/user/login",
             "/api/user/add"
     };

@@ -1,5 +1,18 @@
 # 数据源配置：连接本地 mental_health_assistant 数据库
 spring:
+  # Redis 配置：用于 ChatMemory 持久化（对话历史跨重启保留）
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}  # 默认无密码，生产环境通过环境变量覆盖
+      database: 0  # 默认使用第 0 号库
+      timeout: 3000ms  # 连接超时 3 秒
+      lettuce:
+        pool:
+          max-active: 8   # 最大连接数
+          max-idle: 8     # 最大空闲连接
+          min-idle: 0     # 最小空闲连接
   datasource:
     url: jdbc:mysql://localhost:3306/mental_health_assistant?useSSL=false&serverTimezone=UTC
     username: root

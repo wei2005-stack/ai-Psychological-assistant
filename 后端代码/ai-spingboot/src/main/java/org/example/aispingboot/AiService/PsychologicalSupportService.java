@@ -3,6 +3,7 @@ package org.example.aispingboot.AiService;
 import org.example.aispingboot.DTO.command.ConsultationSessionCreateDTO;
 import org.example.aispingboot.DTO.response.ConsultationMessageResponseDTO;
 import org.example.aispingboot.entity.ConsultationSession;
+import org.example.aispingboot.mq.AiReplyProducer;
 import org.example.aispingboot.service.ConsultationMessageService;
 import org.example.aispingboot.service.ConsultationSessionService;
 import org.springframework.ai.chat.client.ChatClient;
@@ -38,6 +39,10 @@ public class PsychologicalSupportService {
 
     @Autowired
     private ConsultationMessageService consultationMessageService;
+
+    /** Redis Stream 生产者 —— AI 回复异步落库 */
+    @Autowired
+    private AiReplyProducer aiReplyProducer;
 
     /**
      * 创建新的咨询会话。
@@ -179,14 +184,15 @@ public class PsychologicalSupportService {
                     // 流正常结束（模型生成完毕）时回调，此时 fullResponse 才是完整回复
                     .doOnComplete(() -> {
                         String completeRes = fullResponse.toString();
-                        // 将AI返回的内容保存到数据库（消息来源标记为 openai，对应 senderType=2）
-                        consultationMessageService.saveAimessage(dbSessionId, completeRes, "openai");
+                        // AI 回复异步落库：通过 Redis Stream 交给消费者，
+                        // SSE 连接不用等 MySQL 写完；Redis 不可用时生产者自动降级为同步写库
+                        aiReplyProducer.publish(dbSessionId, completeRes, "openai");
                         // 添加AI回复到chatMemory，作为下一轮对话的历史上下文
                         List<Message> aiMessages = new ArrayList<>();
                         aiMessages.add(new AssistantMessage(completeRes));
                         chatMemory.add(conversationId, aiMessages);
 
-                        // 通知前端流已结束，SSE 连接可以关闭
+                        // 通知前端流已结束，SSE 连接可以立即关闭
                         sink.complete();
                     })
                     // 调用过程中出现异常（鉴权失败、超时、网络中断等）时回调：
