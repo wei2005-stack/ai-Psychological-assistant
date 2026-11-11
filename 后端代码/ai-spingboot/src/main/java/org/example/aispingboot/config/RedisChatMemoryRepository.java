@@ -10,7 +10,7 @@ import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.MessageType;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -39,6 +39,15 @@ import java.util.concurrent.TimeUnit;
  *   {"type":"ASSISTANT","text":"你好！有什么可以帮你的？","metadata":{}}
  *   {"type":"SYSTEM","text":"你是一个心理疏导师","metadata":{}}
  * </pre>
+ *
+ * <h3>为什么用 StringRedisTemplate 而不是 RedisTemplate&lt;String, Object&gt;（E2E 踩坑记录）</h3>
+ * <p>项目全局的 {@code RedisTemplate<String, Object>} 配置了
+ * {@code GenericJackson2JsonRedisSerializer + activateDefaultTyping}（为了能还原业务对象的具体类型）。
+ * 如果此处复用它，我们写进去的"JSON 字符串"会被再包一层类型信息，读回来时可能已经变成
+ * {@code ArrayList<LinkedHashMap>} 而不是 String，导致 {@code readValue(json, Map.class)} 抛
+ * {@code MismatchedInputException: Cannot deserialize ... from Array value} —— 表现为对话记忆整体失效。
+ * 因此这里单独使用 {@link StringRedisTemplate}：Value 按纯字符串原样存取，
+ * Redis 里看到的就是上面那种干净 JSON，读写完全可控。</p>
  */
 public class RedisChatMemoryRepository implements ChatMemoryRepository {
 
@@ -56,27 +65,28 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
      */
     private final long timeToLiveDays;
 
-    private final RedisTemplate<String, Object> redisTemplate;
+    /** 纯字符串读写模板：值不会经过 defaultTyping 二次包装 */
+    private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
 
     /**
-     * 创建一个永不过期的 RedisChatMemoryRepository。
+     * 创建一个 30 天过期的 RedisChatMemoryRepository。
      */
-    public RedisChatMemoryRepository(RedisTemplate<String, Object> redisTemplate, ObjectMapper objectMapper) {
-        this(redisTemplate, objectMapper, 30L);
+    public RedisChatMemoryRepository(StringRedisTemplate stringRedisTemplate, ObjectMapper objectMapper) {
+        this(stringRedisTemplate, objectMapper, 30L);
     }
 
     /**
      * 允许自定义过期时间的构造器。
      *
-     * @param redisTemplate   Spring 注入的 Redis 客户端
-     * @param objectMapper    用于 Message ↔ JSON 互转
-     * @param timeToLiveDays  每条会话消息列表的 TTL（天），0 = 永不过期
+     * @param stringRedisTemplate 字符串 Redis 客户端
+     * @param objectMapper        用于 Message ↔ JSON 互转（普通业务 mapper，不要开 defaultTyping）
+     * @param timeToLiveDays      每条会话消息列表的 TTL（天），0 = 永不过期
      */
-    public RedisChatMemoryRepository(RedisTemplate<String, Object> redisTemplate,
-                                      ObjectMapper objectMapper,
-                                      long timeToLiveDays) {
-        this.redisTemplate = redisTemplate;
+    public RedisChatMemoryRepository(StringRedisTemplate stringRedisTemplate,
+                                     ObjectMapper objectMapper,
+                                     long timeToLiveDays) {
+        this.stringRedisTemplate = stringRedisTemplate;
         this.objectMapper = objectMapper;
         this.timeToLiveDays = timeToLiveDays;
     }
@@ -84,18 +94,21 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
     @Override
     public List<Message> findByConversationId(String conversationId) {
         String key = KEY_PREFIX + conversationId;
-        List<Object> rawList = redisTemplate.opsForList().range(key, 0, -1);
+        List<String> rawList = stringRedisTemplate.opsForList().range(key, 0, -1);
         if (rawList == null || rawList.isEmpty()) {
             return Collections.emptyList();
         }
 
         List<Message> messages = new ArrayList<>(rawList.size());
-        for (Object raw : rawList) {
+        for (String json : rawList) {
+            if (json == null || json.isBlank()) {
+                continue;
+            }
             try {
-                String json = raw instanceof String ? (String) raw : objectMapper.writeValueAsString(raw);
                 messages.add(deserialize(json));
             } catch (Exception e) {
-                log.error("反序列化消息失败，跳过该条：conversationId={}, raw={}", conversationId, raw, e);
+                // 单条脏数据不应该让整段对话记忆失效，跳过并记录日志
+                log.error("反序列化消息失败，跳过该条：conversationId={}, raw={}", conversationId, json, e);
             }
         }
         return messages;
@@ -106,7 +119,7 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
         String key = KEY_PREFIX + conversationId;
 
         // saveAll 的语义是"替换所有已有消息"，先删再写
-        redisTemplate.delete(key);
+        stringRedisTemplate.delete(key);
 
         List<String> serialized = new ArrayList<>(messages.size());
         for (Message msg : messages) {
@@ -119,37 +132,33 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
         }
 
         if (!serialized.isEmpty()) {
-            redisTemplate.opsForList().rightPushAll(key, serialized);
+            stringRedisTemplate.opsForList().rightPushAll(key, serialized);
         }
 
         // 记录会话 ID 到索引 Set
-        redisTemplate.opsForSet().add(CONVERSATIONS_KEY, conversationId);
+        stringRedisTemplate.opsForSet().add(CONVERSATIONS_KEY, conversationId);
 
         // 设置过期时间
         if (timeToLiveDays > 0) {
-            redisTemplate.expire(key, timeToLiveDays, TimeUnit.DAYS);
-            redisTemplate.expire(CONVERSATIONS_KEY, timeToLiveDays, TimeUnit.DAYS);
+            stringRedisTemplate.expire(key, timeToLiveDays, TimeUnit.DAYS);
+            stringRedisTemplate.expire(CONVERSATIONS_KEY, timeToLiveDays, TimeUnit.DAYS);
         }
     }
 
     @Override
     public void deleteByConversationId(String conversationId) {
         String key = KEY_PREFIX + conversationId;
-        redisTemplate.delete(key);
-        redisTemplate.opsForSet().remove(CONVERSATIONS_KEY, conversationId);
+        stringRedisTemplate.delete(key);
+        stringRedisTemplate.opsForSet().remove(CONVERSATIONS_KEY, conversationId);
     }
 
     @Override
     public List<String> findConversationIds() {
-        Set<Object> members = redisTemplate.opsForSet().members(CONVERSATIONS_KEY);
+        Set<String> members = stringRedisTemplate.opsForSet().members(CONVERSATIONS_KEY);
         if (members == null || members.isEmpty()) {
             return Collections.emptyList();
         }
-        List<String> ids = new ArrayList<>(members.size());
-        for (Object m : members) {
-            ids.add(m.toString());
-        }
-        return ids;
+        return new ArrayList<>(members);
     }
 
     // ==================== 序列化 / 反序列化 ====================
@@ -176,7 +185,6 @@ public class RedisChatMemoryRepository implements ChatMemoryRepository {
         Map<String, Object> dto = objectMapper.readValue(json, Map.class);
         String typeStr = (String) dto.get("type");
         String text = (String) dto.getOrDefault("text", "");
-        Map<String, Object> metadata = (Map<String, Object>) dto.getOrDefault("metadata", Collections.emptyMap());
 
         MessageType type;
         try {

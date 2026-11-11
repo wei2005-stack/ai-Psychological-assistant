@@ -3,6 +3,7 @@ package org.example.aispingboot.service;
 import cn.hutool.core.date.DateUnit;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.util.StrUtil;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import org.example.aispingboot.DTO.command.ConsultationSessionCreateDTO;
 import org.example.aispingboot.entity.ConsultationSession;
 import org.example.aispingboot.entity.User;
@@ -12,6 +13,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 咨询会话业务服务。
@@ -54,5 +56,57 @@ public class ConsultationSessionService {
         }
 
         return null;
+    }
+
+    /**
+     * 按主键查询会话。
+     * 情绪分析接口用它做归属校验：只能看自己创建的会话，防止越权读取他人会话内容。
+     *
+     * @param sessionId 数据库会话 ID
+     * @return 会话实体，不存在时返回 null
+     */
+    public ConsultationSession getSessionById(Long sessionId) {
+        return consultationSessionMapper.selectById(sessionId);
+    }
+
+    /**
+     * 分页查询某个用户的会话列表，按开始时间倒序（最新的在最上面）。
+     *
+     * <p>项目没有配置 MyBatis-Plus 分页插件，这里用 limit 手写分页，
+     * 返回当前页数据；总数由 {@link #countByUser(Long)} 单独查。</p>
+     *
+     * @param userId   用户 ID
+     * @param pageNum  页码，从 1 开始
+     * @param pageSize 每页条数
+     * @return 当前页会话列表
+     */
+    public List<ConsultationSession> listByUser(Long userId, int pageNum, int pageSize) {
+        int offset = Math.max(0, (pageNum - 1) * pageSize);
+        LambdaQueryWrapper<ConsultationSession> w = new LambdaQueryWrapper<>();
+        w.eq(ConsultationSession::getUserId, userId)
+                .orderByDesc(ConsultationSession::getStartedAt)
+                .last("limit " + offset + "," + pageSize);
+        return consultationSessionMapper.selectList(w);
+    }
+
+    /**
+     * 统计某个用户的会话总数，供分页返回。
+     *
+     * @param userId 用户 ID
+     * @return 会话条数
+     */
+    public long countByUser(Long userId) {
+        LambdaQueryWrapper<ConsultationSession> w = new LambdaQueryWrapper<>();
+        w.eq(ConsultationSession::getUserId, userId);
+        return consultationSessionMapper.selectCount(w);
+    }
+
+    /**
+     * 删除会话记录本身（消息记录由 ConsultationMessageService 负责删除）。
+     *
+     * @param sessionId 会话 ID
+     */
+    public void deleteById(Long sessionId) {
+        consultationSessionMapper.deleteById(sessionId);
     }
 }

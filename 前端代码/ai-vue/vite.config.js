@@ -13,7 +13,10 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://159.75.169.224:1235',
+        // 本地联调统一指向本机后端（server.port=1236）。
+        // SSE（/api/psychological-chat/stream）也走这条代理，
+        // 代理默认不缓冲流式响应，逐字输出可以正常透传。
+        target: 'http://localhost:1236',
         changeOrigin: true
       }
     }

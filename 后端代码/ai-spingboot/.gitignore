@@ -4,6 +4,9 @@ target/
 !**/src/main/**/target/
 !**/src/test/**/target/
 
+# 本地上传的图片（运行时产物，不进仓库）
+upload/
+
 ### STS ###
 .apt_generated
 .classpath

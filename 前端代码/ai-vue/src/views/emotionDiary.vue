@@ -132,6 +132,10 @@
         addEmotionDiary(diaryForm).then(() => {
             ElMessage.success('提交成功')
             resetForm()
+        }).catch((err) => {
+            // 兜底提示：之前没有 catch，后端返回 500 时页面毫无反应，用户以为按钮失效
+            console.error('情绪日记提交失败', err)
+            ElMessage.error('提交失败，请稍后重试')
         })
     }
 

@@ -20,12 +20,24 @@ import org.springframework.data.redis.serializer.StringRedisSerializer;
 @Configuration
 public class RedisConfig {
 
-    @Bean
-    public ObjectMapper redisObjectMapper() {
+    /**
+     * 构造专供 Redis 使用的 ObjectMapper。
+     *
+     * <p><b>注意：这里刻意不声明为 {@code @Bean}。</b>
+     * 如果把它注册成 Bean，Spring Boot 的 JacksonAutoConfiguration 会因为
+     * 「已存在 ObjectMapper」而退避，Spring MVC 的 @RequestBody 反序列化就会复用这个
+     * 开启了 defaultTyping 的 mapper，导致所有请求体都必须带 {@code @class} 字段，
+     * 前端正常 JSON 会直接解析失败（HttpMessageNotReadableException）。
+     * 所以只作为 RedisTemplate 的内部依赖，不进入 Spring 容器。</p>
+     *
+     * <p>开启 defaultTyping 是为了让 GenericJackson2JsonRedisSerializer 在反序列化时
+     * 能还原出具体的 Java 类型，否则取出来全是 LinkedHashMap。</p>
+     */
+    private ObjectMapper buildRedisObjectMapper() {
         ObjectMapper mapper = new ObjectMapper();
-        // 允许序列化所有字段
+        // 允许序列化所有字段（包括 private）
         mapper.setVisibility(PropertyAccessor.ALL, JsonAutoDetect.Visibility.ANY);
-        // 关闭默认的类型嵌入（避免多余的 @class 字段），保持输出简洁
+        // 开启类型信息嵌入（Redis 里会多一个 @class 字段，用于反序列化还原类型）
         mapper.activateDefaultTyping(
                 LaissezFaireSubTypeValidator.instance,
                 ObjectMapper.DefaultTyping.NON_FINAL,
@@ -35,12 +47,13 @@ public class RedisConfig {
     }
 
     @Bean
-    public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory factory, ObjectMapper redisObjectMapper) {
+    public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory factory) {
         RedisTemplate<String, Object> template = new RedisTemplate<>();
         template.setConnectionFactory(factory);
 
         StringRedisSerializer stringSerializer = new StringRedisSerializer();
-        GenericJackson2JsonRedisSerializer jsonSerializer = new GenericJackson2JsonRedisSerializer(redisObjectMapper);
+        GenericJackson2JsonRedisSerializer jsonSerializer =
+                new GenericJackson2JsonRedisSerializer(buildRedisObjectMapper());
 
         // Key 用字符串序列化（确保 Redis 里看到的是原始字符串）
         template.setKeySerializer(stringSerializer);

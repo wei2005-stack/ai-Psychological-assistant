@@ -5,6 +5,7 @@ import org.springframework.validation.FieldError;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import java.util.stream.Collectors;
 
@@ -45,5 +46,19 @@ public class GlobarExceptionHandler {
             return Result.error(e.getCode(), e.getMessage(), e.getData());
         }
         return Result.error(e.getCode(), e.getMessage(), null);
+    }
+
+    /**
+     * 处理上传文件超过 multipart 上限的异常。
+     *
+     * <p>该异常在 DispatcherServlet 解析 multipart 阶段就被抛出，
+     * 此时还没进入 Controller，因此必须放在全局异常处理器里才能返回统一 JSON。</p>
+     *
+     * @param e 上传超限异常
+     * @return 参数错误响应
+     */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public Result<Void> handleMaxUploadSize(MaxUploadSizeExceededException e) {
+        return Result.error(ResultCode.PARAM_ERROR.getCode(), "图片不能超过 5MB", null);
     }
 }

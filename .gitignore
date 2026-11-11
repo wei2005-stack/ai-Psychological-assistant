@@ -23,12 +23,17 @@ out/
 *.pkg
 *.exe
 
-# ---- 个人材料（简历、面试准备）----
+# ---- 个人材料（简历、面试准备、临时脚本）----
 简历-*.pdf
+*简历*.pdf
 简历-*.html
 面试准备-*.md
 面试准备-*.docx
+*面试*.docx
 photo.jpg
+generate_resume.py
+query
+后端sql地址.txt
 
 # ---- 本地密钥 ----
 .env

@@ -4,8 +4,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.example.aispingboot.config.StreamConstants;
 import org.example.aispingboot.service.ConsultationMessageService;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
-import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.HashMap;
@@ -44,23 +43,29 @@ import java.util.Map;
  * @see AiReplyConsumer  消费端
  */
 @Component
-@ConditionalOnBean(RedisTemplate.class)   // RedisTemplate 不存在时（比如 Redis 没连上）不创建
 public class AiReplyProducer {
 
     private static final Logger log = LoggerFactory.getLogger(AiReplyProducer.class);
 
-    private final RedisTemplate<String, Object> redisTemplate;
+    private final StringRedisTemplate stringRedisTemplate;
     private final ConsultationMessageService consultationMessageService;
 
     /**
      * 构造注入。
-     * RedisTemplate 由 {@link org.example.aispingboot.config.RedisConfig} 提供
-     * （Jackson 序列化 + String key），consultationMessageService 是 MySQL 落库服务，
-     * 降级时直接同步调用。
+     *
+     * <p><b>为什么用 StringRedisTemplate 而不是全局的 RedisTemplate&lt;String, Object&gt;？</b>
+     * 全局 RedisTemplate 的 value 序列化器是「GenericJackson2JsonRedisSerializer + defaultTyping」，
+     * 写 Stream 时每个字段值会被序列化成带引号的 JSON 字符串（如 {@code "23"}），
+     * 消费端用 String 序列化器读出来就是带引号的 {@code "23"}，
+     * {@code Long.parseLong("23".length==4)} 会直接抛 NumberFormatException，消息永远消费失败。
+     * StringRedisTemplate 原样存取，Producer / Consumer 两端字节完全一致。</p>
+     *
+     * @param stringRedisTemplate         字符串 Redis 客户端（Spring Boot 自动配置）
+     * @param consultationMessageService  MySQL 落库服务，Redis 不可用时降级直接调用
      */
-    public AiReplyProducer(RedisTemplate<String, Object> redisTemplate,
+    public AiReplyProducer(StringRedisTemplate stringRedisTemplate,
                            ConsultationMessageService consultationMessageService) {
-        this.redisTemplate = redisTemplate;
+        this.stringRedisTemplate = stringRedisTemplate;
         this.consultationMessageService = consultationMessageService;
     }
 
@@ -75,7 +80,7 @@ public class AiReplyProducer {
      * @param aiModel     模型标识，当前固定 "openai"（对应 Spring AI OpenAiChatModel）
      */
     public void publish(Long dbSessionId, String content, String aiModel) {
-        Map<String, Object> fields = new HashMap<>(4);
+        Map<String, String> fields = new HashMap<>(4);
         fields.put(StreamConstants.FIELD_DB_SESSION_ID, String.valueOf(dbSessionId));
         fields.put(StreamConstants.FIELD_CONTENT, content);
         fields.put(StreamConstants.FIELD_AI_MODEL, aiModel);
@@ -83,7 +88,7 @@ public class AiReplyProducer {
         try {
             // RedisTemplate.opsForStream().add() 底层是 XADD 命令，返回自动生成的 Stream ID
             // （形如 "1794323420684-0"），Producer 端不关心 ID，Redis 自己维护
-            redisTemplate.opsForStream()
+            stringRedisTemplate.opsForStream()
                     .add(StreamConstants.AI_REPLY_STREAM_KEY, fields);
             // DEBUG 级别避免生产环境刷屏，关键路径日志用 INFO/WARN/ERROR
             log.debug("AI 回复已发布到 Redis Stream, sessionId={}", dbSessionId);

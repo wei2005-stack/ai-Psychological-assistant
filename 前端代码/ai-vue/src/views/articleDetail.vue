@@ -2,6 +2,8 @@
     <div class="articleDetail-container">
         <div class="header-section">
             <div class="header-content">
+                <!-- 返回按钮：文章详情是二级页面，之前没有回退入口，只能靠浏览器后退 -->
+                <el-button class="back-btn" :icon="ArrowLeft" @click="goBack">返回知识库</el-button>
                 <el-image :src="iconUrl" style="width: 60px;height: 60px"></el-image>
                 <h1>知识文章详情</h1>
             </div>
@@ -46,11 +48,19 @@
 </template>
 <script setup>
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { getKnowledgeDetail } from '@/api/frontend'
 import { dayjs } from 'element-plus'
-import { Avatar } from '@element-plus/icons-vue'
+import { Avatar, ArrowLeft } from '@element-plus/icons-vue'
 
 const iconUrl = new URL('@/assets/images/book.png', import.meta.url).href
+
+const router = useRouter()
+
+// 返回到知识库列表：用 push 而不是 back，直接从外部链接打开详情时也能回到列表
+const goBack = () => {
+    router.push('/knowledge')
+}
 
 const props = defineProps({
     id: String
@@ -99,6 +109,17 @@ onMounted(() => {
             display: flex;
             align-items: center;
             gap: 12px;
+            .back-btn {
+                margin-right: 8px;
+                background: rgba(255, 255, 255, 0.2);
+                border-color: rgba(255, 255, 255, 0.6);
+                color: #fff;
+                &:hover {
+                    background: rgba(255, 255, 255, 0.35);
+                    border-color: #fff;
+                    color: #fff;
+                }
+            }
         }
     }
     .content {

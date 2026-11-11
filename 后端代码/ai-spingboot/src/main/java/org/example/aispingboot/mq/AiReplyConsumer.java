@@ -4,9 +4,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.example.aispingboot.config.StreamConstants;
 import org.example.aispingboot.service.ConsultationMessageService;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.data.redis.connection.stream.MapRecord;
-import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.stream.StreamListener;
 import org.springframework.stereotype.Component;
 
@@ -48,17 +47,18 @@ import org.springframework.stereotype.Component;
  * @see StreamConstants   Stream Key / Field 常量定义
  */
 @Component
-// RedisTemplate 不存在时（Redis 没连上）不创建消费者，
-// 此时 Producer 侧 catch 异常后降级为同步写库，整条 Stream 链路静默跳过
-@ConditionalOnBean(RedisTemplate.class)
 public class AiReplyConsumer implements StreamListener<String, MapRecord<String, String, String>> {
 
     private static final Logger log = LoggerFactory.getLogger(AiReplyConsumer.class);
 
     private final ConsultationMessageService consultationMessageService;
+    /** 用于消费成功后显式 XACK（Spring Data Redis 3.5 的监听容器不会自动确认） */
+    private final StringRedisTemplate stringRedisTemplate;
 
-    public AiReplyConsumer(ConsultationMessageService consultationMessageService) {
+    public AiReplyConsumer(ConsultationMessageService consultationMessageService,
+                           StringRedisTemplate stringRedisTemplate) {
         this.consultationMessageService = consultationMessageService;
+        this.stringRedisTemplate = stringRedisTemplate;
     }
 
     /**
@@ -86,7 +86,8 @@ public class AiReplyConsumer implements StreamListener<String, MapRecord<String,
             // 内容为空直接跳过（正常情况不会发生，但防御一下）
             if (content.isEmpty()) {
                 log.warn("Stream 消息 content 为空，跳过, recordId={}", record.getId());
-                // 不抛异常 → 让容器 ACK，避免空消息卡在 Pending List 里反复被拉取
+                // 空消息也要 ACK，避免卡在 Pending List 里反复被拉取
+                acknowledge(record);
                 return;
             }
 
@@ -97,11 +98,30 @@ public class AiReplyConsumer implements StreamListener<String, MapRecord<String,
             log.debug("Redis Stream 消费完成并落库, sessionId={}, model={}, recordId={}",
                     dbSessionId, aiModel, record.getId());
 
+            // --- 4. 显式 XACK ---
+            // 实测 Spring Data Redis 3.5 的 StreamMessageListenerContainer 只负责投递，
+            // 不会在 onMessage 正常返回后代为确认；不手动 ACK 的话消息会永久留在 Pending List
+            // （XINFO GROUPS 里 pending 持续增长），既占内存又影响监控判断。
+            acknowledge(record);
+
         } catch (Exception e) {
             // 消费失败 → 主动抛出，让 ListenerContainer 不 ACK
             // 消息留在 Pending List，等待重平衡或 XCLAIM 重新领取
             log.error("Redis Stream 消费失败, recordId={}, 原因: {}", record.getId(), e.getMessage(), e);
             throw new RuntimeException("Redis Stream 消费失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 确认消息已被成功处理（XACK）。
+     * ACK 失败只记录日志，不影响已经完成的落库结果。
+     */
+    private void acknowledge(MapRecord<String, String, String> record) {
+        try {
+            stringRedisTemplate.opsForStream()
+                    .acknowledge(StreamConstants.AI_REPLY_CONSUMER_GROUP, record);
+        } catch (Exception e) {
+            log.warn("Redis Stream ACK 失败, recordId={}, 原因: {}", record.getId(), e.getMessage());
         }
     }
 }

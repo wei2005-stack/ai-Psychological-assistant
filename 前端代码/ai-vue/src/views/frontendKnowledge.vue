@@ -64,6 +64,7 @@
     import { dayjs, ElMessage } from 'element-plus'
     import { ref, reactive, onMounted } from 'vue'
     import { getKnowledgeList } from '@/api/frontend'
+    import { fileBaseUrl } from '@/config/index.js'
     import { useRouter } from 'vue-router'
 
     const router = useRouter()
@@ -94,9 +95,9 @@
             pagination.total = res.total
         })
     }
-    // 获取封面图片
+    // 获取封面图片：后端存的是相对路径，拼上 fileBaseUrl 才能显示
     const getImage = (url) => {
-        return url ? 'http://159.75.169.224:1235' + url : 'https://file.itndedu.com/psychology_ai.png'
+        return url ? fileBaseUrl + url : 'https://file.itndedu.com/psychology_ai.png'
     }
 
     const handleChange = (page) => {

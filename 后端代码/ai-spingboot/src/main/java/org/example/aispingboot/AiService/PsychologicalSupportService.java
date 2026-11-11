@@ -1,24 +1,20 @@
 package org.example.aispingboot.AiService;
 
 import org.example.aispingboot.DTO.command.ConsultationSessionCreateDTO;
-import org.example.aispingboot.DTO.response.ConsultationMessageResponseDTO;
 import org.example.aispingboot.entity.ConsultationSession;
 import org.example.aispingboot.mq.AiReplyProducer;
 import org.example.aispingboot.service.ConsultationMessageService;
 import org.example.aispingboot.service.ConsultationSessionService;
+import org.example.aispingboot.service.EmotionAnalyzer;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
-import org.springframework.ai.chat.messages.AssistantMessage;
-import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -30,9 +26,6 @@ public class PsychologicalSupportService {
     @Autowired
     @Qualifier("open-ai")
     private ChatClient chatClient;
-
-    @Autowired
-    private ChatMemory chatMemory;
 
     @Autowired
     private ConsultationSessionService consultationSessionService;
@@ -89,9 +82,8 @@ public class PsychologicalSupportService {
      * <p>执行步骤：</p>
      * <ol>
      *   <li>解析并校验对外 sessionId，格式必须是 {@code session_{数据库ID}}；</li>
-     *   <li>处理初始消息去重：会话只有 1 条消息且内容与该条用户消息完全一致时，
-     *       说明该消息在 {@link #startSession} 中已经落库，本轮不再重复保存；</li>
-     *   <li>保存本轮用户消息（非初始消息时），保证每轮输入在消息表中恰好一条；</li>
+     *   <li>保存本轮用户消息（数据库唯一索引保证同会话同内容不会重复入库，
+     *       命中时 {@link ConsultationMessageService} 会自动返回已存在记录，不会抛异常）；</li>
      *   <li>写入对话记忆并调用 ChatClient 流式生成，把分片逐个推给前端；</li>
      *   <li>流正常结束后，把完整 AI 回复落库并写回对话记忆（见下方 doOnComplete）。</li>
      * </ol>
@@ -117,27 +109,23 @@ public class PsychologicalSupportService {
                 sink.error(new RuntimeException("会话ID格式错误"));
                 return;
             }
- 
-            // 第 2 步：初始消息去重判断
-            // 前端创建会话后一般会立刻用首条消息触发 AI 回复，而这条消息在 startSession 时已落库；
-            // 通过"消息总数 = 1 且最后一条是用户消息、内容完全一致"来识别这种重复提交
-            // 是否为初始消息
-            boolean isInitialMessage = false;
-            // 检查是否为初始消息，避免重复保存
-            Integer messageCount = consultationMessageService.getMessageCountBySessionId(dbSessionId);
-            if (messageCount == 1) {
-               ConsultationMessageResponseDTO lastMessage = consultationMessageService.getLastMessageBySessionId(dbSessionId);
-                // senderType == 1 表示上一条是用户发送的消息（2 为 AI 助手）
-                if (lastMessage != null && lastMessage.getSenderType() == 1 && userMessage.equals(lastMessage.getContent())) {
-                    isInitialMessage = true;
-                }
-            }
 
-            // 第 3 步：只有非初始消息才落库，避免同一句话在消息表中存两条
-            if (!isInitialMessage) {
-                // 保存用户消息到数据库（情绪标签本轮不识别，传 null）
-                consultationMessageService.saveUserMessage(dbSessionId, userMessage, null);
-            }
+            // 第 2 步：先做情绪与危机识别（规则驱动，不依赖模型）。
+            // 放在模型调用之前，是因为风险等级要用来决定"是否强制追加热线兜底"，
+            // 这个判断不能被模型输出左右，必须是确定性的。
+            EmotionAnalyzer.EmotionResult emotion = EmotionAnalyzer.analyze(userMessage);
+
+            // 第 3 步：保存本轮用户消息，并把识别出的情绪写入 emotion_tag 字段。
+            // 数据库唯一索引 (session_id, sender_type, content(200)) 负责防重：
+            // 同一会话里、同一个发送者的同一条消息，数据库层面只允许一条；
+            // Service 层捕获 DuplicateKeyException 后返回已存在的记录，不中断业务流程。
+            // 这样既防住了"startSession 已存过 + stream 又来一次"的初始消息重复，
+            // 也防住了任何后续轮次的并发重复请求。
+            consultationMessageService.saveUserMessage(dbSessionId, userMessage, emotion.primaryEmotion());
+
+            // 风险等级 >= 2（预警 / 危机）时，回复末尾必须追加热线与求助指引，
+            // 避免模型漏掉关键的安全提示
+            boolean needCrisisAppendix = emotion.riskLevel() >= 2;
 
             // ==================== 一、准备对话上下文 ====================
             // 进行流式对话
@@ -147,13 +135,11 @@ public class PsychologicalSupportService {
             // 同一会话的多轮对话都共享这一个 conversationId 下的记忆
             String conversationId = "conversation_" + sessionId;
 
-            // 把本轮用户消息写入对话记忆（MessageWindowChatMemory，最多保留最近 30 条）。
-            // 注意：ChatClient 已默认挂载 MessageChatMemoryAdvisor（见 ChatClientConfig），
-            // 该 Advisor 在发起调用前会自动从 chatMemory 读取该会话历史拼进请求，
-            // 因此这里的记忆内容会被带到本轮模型调用中
-            List<Message> userMessages = new ArrayList<>();
-            userMessages.add(new UserMessage(userMessage));
-            chatMemory.add(conversationId, userMessages);
+            // 注意：这里不再手动 chatMemory.add(userMessage)。
+            // ChatClient 默认挂载的 MessageChatMemoryAdvisor 会在调用前后自动完成
+            // 「读历史 + 写入本轮用户消息 + 写入模型回复」三件事；
+            // 早期版本这里又手动 add 了一次，导致 Redis 里每条消息都存两遍
+            // （E2E 实测 LLEN=4，内容为 USER,USER,ASSISTANT,ASSISTANT，白白浪费上下文窗口）。
 
             // 构建 Prompt：显式放入系统提示词，约束 AI 的角色、语气和回复边界；
             // 本轮用户输入则通过下面的 .user(userMessage) 追加，不在 Prompt 里重复放
@@ -183,22 +169,39 @@ public class PsychologicalSupportService {
                     })
                     // 流正常结束（模型生成完毕）时回调，此时 fullResponse 才是完整回复
                     .doOnComplete(() -> {
+                        // 高风险会话：把热线兜底文案追加到模型回复后面。
+                        // 用确定性文本兜底，而不是指望模型自己想起来给热线，
+                        // 保证「识别到风险 → 一定出现求助渠道」这个安全承诺成立
+                        if (needCrisisAppendix) {
+                            String appendix = EmotionAnalyzer.buildCrisisAppendix();
+                            fullResponse.append(appendix);
+                            // 先推送给前端，用户能立刻看到热线信息
+                            sink.next(appendix);
+                        }
+
                         String completeRes = fullResponse.toString();
                         // AI 回复异步落库：通过 Redis Stream 交给消费者，
-                        // SSE 连接不用等 MySQL 写完；Redis 不可用时生产者自动降级为同步写库
+                        // SSE 连接不用等 MySQL 写完；Redis 不可用时生产者自动降级为同步写库。
+                        // 落库内容包含兜底文案，保证数据库记录与用户看到的回复一致
                         aiReplyProducer.publish(dbSessionId, completeRes, "openai");
-                        // 添加AI回复到chatMemory，作为下一轮对话的历史上下文
-                        List<Message> aiMessages = new ArrayList<>();
-                        aiMessages.add(new AssistantMessage(completeRes));
-                        chatMemory.add(conversationId, aiMessages);
+
+                        // 对话记忆的写入由 MessageChatMemoryAdvisor 在流结束后自动完成，
+                        // 这里不再手动 chatMemory.add(assistant)，否则同一回复会存两遍
 
                         // 通知前端流已结束，SSE 连接可以立即关闭
                         sink.complete();
                     })
-                    // 调用过程中出现异常（鉴权失败、超时、网络中断等）时回调：
-                    // 把错误透传给 sink，前端收到 error 事件后结束接收
+                    // 调用过程中出现异常（鉴权失败、超时、网络中断等）时回调
                     .doOnError(error -> {
-                        sink.error(error);
+                        if (emotion.riskLevel() >= 3) {
+                            // 危机场景下模型调用失败，仍然要把热线送达用户——
+                            // 这是兜底逻辑最该生效的时刻，直接推送兜底文案并正常结束流
+                            sink.next(EmotionAnalyzer.buildCrisisAppendix());
+                            sink.complete();
+                        } else {
+                            // 普通场景把错误透传给 sink，前端收到 error 事件后结束接收
+                            sink.error(error);
+                        }
                     })
                     // Reactor 采用惰性执行，不调用 subscribe 就不会真正发请求；
                     // 订阅后数据流才开始流动，上面三个 doOnXxx 回调也才会被触发

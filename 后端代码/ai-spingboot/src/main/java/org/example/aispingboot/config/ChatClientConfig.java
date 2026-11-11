@@ -14,6 +14,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 /**
  * AI 对话客户端配置。
@@ -90,8 +91,7 @@ public class ChatClientConfig {
     @Bean
     public ChatMemory chatMemory(
             org.springframework.beans.factory.ObjectProvider<RedisConnectionFactory> connectionFactoryProvider,
-            RedisTemplate<String, Object> redisTemplate,
-            ObjectMapper redisObjectMapper) {
+            ObjectMapper objectMapper) {
 
         RedisConnectionFactory factory = connectionFactoryProvider.getIfAvailable();
 
@@ -106,8 +106,15 @@ public class ChatClientConfig {
             conn.ping(); // 主动 PING 一下确认能通
 
             log.info("✨ 使用 Redis 持久化对话记忆（TTL 30 天，滑动窗口 30 条）");
+
+            // 对话记忆单独使用 StringRedisTemplate：
+            // 全局 RedisTemplate<String,Object> 的值序列化器开了 defaultTyping（会二次包装类型信息），
+            // 直接复用会让消息 JSON 读回来变成 List/Map 而非字符串，导致反序列化失败。
+            StringRedisTemplate stringRedisTemplate = new StringRedisTemplate(factory);
+            stringRedisTemplate.afterPropertiesSet();
+
             RedisChatMemoryRepository repo = new RedisChatMemoryRepository(
-                    redisTemplate, redisObjectMapper, 30L);
+                    stringRedisTemplate, objectMapper, 30L);
             return MessageWindowChatMemory.builder()
                     .chatMemoryRepository(repo)
                     .maxMessages(30)

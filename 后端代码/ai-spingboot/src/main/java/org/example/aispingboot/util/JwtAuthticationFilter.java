@@ -1,6 +1,7 @@
 package org.example.aispingboot.util;
 
 import cn.hutool.json.JSONUtil;
+import com.auth0.jwt.exceptions.JWTVerificationException;
 import jakarta.annotation.Resource;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -39,8 +40,8 @@ public class JwtAuthticationFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String requestUri = request.getRequestURI();
-        // 检查是否为公开路径
-        return SecurityConfig.isPublicPATH(requestUri);
+        // 检查是否为公开路径（知识库读接口仅 GET 放行，因此还要带上请求方法）
+        return SecurityConfig.isPublicPATH(requestUri, request.getMethod());
     }
 
     /**
@@ -67,7 +68,18 @@ public class JwtAuthticationFilter extends OncePerRequestFilter {
         String token = JwtTokenUtil.extractTokenFromRequest(request);
         if (StringUtils.hasText(token)) {
             // 2. 验证token并获取用户信息
-            JwtTokenUtil.TokenVerificationResult validationResult = JwtTokenUtil.validateToken(token);
+            // 注意：verifyToken 在签名不匹配、token 过期时是直接抛异常的（文档约定「失败即抛」），
+            // 必须在这里捕获。否则异常会穿透过滤器，被 Servlet 容器当成 500 返回，
+            // 前端只能看到「服务器错误」，既不会清 token 也不会跳登录页
+            // （联调时浏览器的旧 token 就是踩了这个坑：POST /api/emotion-diary 返回 500）。
+            JwtTokenUtil.TokenVerificationResult validationResult;
+            try {
+                validationResult = JwtTokenUtil.validateToken(token);
+            } catch (JWTVerificationException e) {
+                clearSecurityContext();
+                ResponseUtil.writeError(response, ResultCode.TOKEN_INVALID);
+                return;
+            }
             if (validationResult != null && validationResult.isValid()) {
                 // 3. 调用service层服务-》查询用户信息
                 UserLoginResponseDTO.UserDetailResponseDTO user = userService.getUserById(validationResult.getUserId());
@@ -95,10 +107,12 @@ public class JwtAuthticationFilter extends OncePerRequestFilter {
                 } else {
                     clearSecurityContext();
                     ResponseUtil.writeError(response, ResultCode.TOKEN_ACCESS_FORBIDDEN);
+                    return;
                 }
             } else {
                 clearSecurityContext();
                 ResponseUtil.writeError(response, ResultCode.TOKEN_INVALID);
+                return;
             }
         } else {
             // 清理上下文
